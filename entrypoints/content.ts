@@ -115,9 +115,9 @@ function setupResponseObserver(getLastPrompt: () => string) {
 function captureLatestResponse(promptText: string) {
   console.log("Attempting to capture response text...");
 
-  // Using the new data-assistant-markdown-root selector for ChatGPT
+  // Unified bulletproof selectors for ChatGPT, Claude, and Gemini
   const assistantNodes = document.querySelectorAll(
-    '[data-assistant-markdown-root], [data-message-author-role="assistant"], .font-claude-message, message-content',
+    '[data-assistant-markdown-root], [data-message-author-role="assistant"], [data-perf-reply-text], message-content',
   );
 
   console.log(`Found ${assistantNodes.length} possible response nodes.`);
@@ -129,7 +129,6 @@ function captureLatestResponse(promptText: string) {
     return;
   }
 
-  // Grab the very last response container on the page
   const latestNode = assistantNodes[assistantNodes.length - 1] as HTMLElement;
   const replyText = latestNode.innerText || latestNode.textContent || "";
 
