@@ -5,6 +5,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import chromadb
 from chromadb.utils import embedding_functions
+import json
+import uuid
 
 # For Groq inference (ultra-fast)
 from langchain_groq import ChatGroq
@@ -122,3 +124,77 @@ async def refine_prompt(req: RefineRequest):
 @app.get("/health")
 def health_check():
     return {"status": "ok", "total_memories": memory_collection.count()}
+
+# Extraction template that discards conversational churn and keeps only technical facts
+INGEST_PROMPT_TEMPLATE = """You are a technical context extraction engine.
+Analyze the following conversation turn between a developer and an LLM.
+
+User Prompt:
+"{user_prompt}"
+
+LLM Response:
+"{llm_response}"
+
+Instructions:
+1. Extract ONLY key architectural decisions, libraries chosen, tech stack details, constraints, or coding patterns.
+2. Discard all conversational filler, greetings, and generic explanations.
+3. If no actionable architectural facts or technical choices are present, return an empty list: [].
+4. Return ONLY valid JSON in this exact structure:
+{{"facts": ["fact 1", "fact 2"]}}
+"""
+
+ingest_prompt_template = ChatPromptTemplate.from_template(INGEST_PROMPT_TEMPLATE)
+ingest_chain = ingest_prompt_template | llm
+
+class IngestRequest(BaseModel):
+    user_prompt: str
+    llm_response: str
+    source_url: str
+
+class IngestResponse(BaseModel):
+    facts_stored: list[str]
+    status: str
+
+@app.post("/ingest", response_model=IngestResponse)
+async def ingest_conversation(req: IngestRequest):
+    if not req.llm_response.strip():
+        return IngestResponse(facts_stored=[], status="ignored_empty")
+
+    try:
+        # Run asynchronous extraction
+        extraction_result = ingest_chain.invoke({
+            "user_prompt": req.user_prompt,
+            "llm_response": req.llm_response[:3000]  # truncate to prevent context blowout
+        })
+        
+        # Clean response and parse JSON
+        content = extraction_result.content.strip()
+        # Strip potential markdown formatting
+        if content.startswith("```json"):
+            content = content[7:]
+        if content.startswith("```"):
+            content = content[3:]
+        if content.endswith("```"):
+            content = content[:-3]
+        
+        parsed = json.loads(content.strip())
+        facts = parsed.get("facts", [])
+
+        if not facts:
+            return IngestResponse(facts_stored=[], status="no_high_value_facts")
+
+        # Save extracted facts into ChromaDB
+        doc_ids = [f"mem_{uuid.uuid4().hex[:8]}" for _ in facts]
+        metadatas = [{"source": req.source_url, "category": "extracted_memory"} for _ in facts]
+
+        memory_collection.add(
+            documents=facts,
+            metadatas=metadatas,
+            ids=doc_ids
+        )
+
+        return IngestResponse(facts_stored=facts, status="success")
+
+    except Exception as e:
+        print(f"Error during ingestion: {e}")
+        return IngestResponse(facts_stored=[], status=f"error: {str(e)}")
